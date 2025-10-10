@@ -1,141 +1,77 @@
 import streamlit as st
+from fpdf import FPDF
 from io import BytesIO
-from reportlab.lib.pagesizes import A4, letter
-from reportlab.lib.units import inch
-from reportlab.pdfgen import canvas
-from reportlab.graphics.barcode import code128
+from barcode import Code128
+from barcode.writer import ImageWriter
+from PIL import Image
 
-# ------------------------------
-# Helper Functions
-# ------------------------------
+st.set_page_config(page_title="Warehouse Bin Label Generator", layout="wide")
+st.title("Warehouse Bin Label Generator")
 
-def generate_bin_codes(start_prefix, middle_values, start_aisle, end_aisle,
-                       level_letters, start_level, end_level):
-    """
-    Generate bin codes including dash before level.
-    Returns list of strings.
-    """
+# --- User inputs ---
+prefix = st.text_input("Prefix", value="16EA")
+start_middle = st.text_input("Start Middle (comma-separated)", value="01")
+start_aisle = st.text_input("Start Aisle", value="A")
+start_level_letter = st.text_input("Start Level Letter (optional, comma-separated)", value="A")
+start_level = st.text_input("Start Level (optional)", value="1")
+
+end_middle = st.text_input("End Middle (comma-separated)", value="20")
+end_aisle = st.text_input("End Aisle", value="A")
+end_level_letter = st.text_input("End Level Letter (optional, comma-separated)", value="A")
+end_level = st.text_input("End Level (optional)", value="5")
+
+label_width = st.number_input("Label Width (inches)", value=4.0)
+label_height = st.number_input("Label Height (inches)", value=6.0)
+
+generate_button = st.button("Generate PDF Labels")
+
+# --- Helper to create sequences ---
+def generate_codes():
+    middle_nums = range(int(start_middle), int(end_middle)+1)
+    level_nums = range(int(start_level), int(end_level)+1) if start_level and end_level else [None]
+    level_letters = start_level_letter.split(",") if start_level_letter else [None]
+
     codes = []
-    for mid in middle_values:
-        for aisle in range(start_aisle, end_aisle + 1):
-            if level_letters:
-                for letter in level_letters:
-                    for level in range(start_level, end_level + 1):
-                        code = f"{start_prefix}{mid}{aisle:02}{letter}-{level}"
-                        codes.append(code)
-            else:
-                for level in range(start_level, end_level + 1):
-                    code = f"{start_prefix}{mid}{aisle:02}-{level}"
-                    codes.append(code)
+    for m in middle_nums:
+        for ll in level_letters:
+            for lv in level_nums:
+                code = f"{prefix}{str(m).zfill(2)}"
+                if ll:
+                    code += f"{ll}"
+                if lv is not None:
+                    code += f"-{lv}"
+                codes.append(code)
     return codes
 
-def draw_labels_pdf(codes, label_w_in, label_h_in, orientation, page_size):
-    """
-    Draw Code128 barcoded labels into a PDF buffer.
-    Barcode on top, human-readable text below.
-    """
-    label_w = label_w_in * inch
-    label_h = label_h_in * inch
-    buffer = BytesIO()
-    c = canvas.Canvas(buffer, pagesize=page_size)
-
-    if orientation == "vertical":
-        label_w, label_h = label_h, label_w
-
-    margin_x = 0.25 * inch
-    margin_y = 0.25 * inch
-    x = margin_x
-    y = margin_y
+# --- Generate PDF ---
+def create_pdf(codes):
+    pdf = FPDF(unit='in', format=(label_width, label_height))
+    pdf.set_auto_page_break(False)
 
     for code in codes:
-        c.saveState()
-        try:
-            # Code128 barcode
-            barcode = code128.Code128(code, barHeight=1.2*inch, humanReadable=0)
-            barcode_width = barcode.width
-            scale = min((label_w - 0.5*inch)/barcode_width, 1.5)
-            c.translate(x + (label_w - barcode_width*scale)/2.0, y + label_h - 1.7*inch)
-            c.scale(scale, scale)
-            barcode.drawOn(c, 0, 0)
+        pdf.add_page()
+        # Barcode
+        barcode_obj = Code128(code, writer=ImageWriter(), add_checksum=False)
+        barcode_bytes = BytesIO()
+        barcode_obj.write(barcode_bytes, {"module_height": 10, "quiet_zone": 2})
+        barcode_bytes.seek(0)
+        barcode_img = Image.open(barcode_bytes)
+        img_path = BytesIO()
+        barcode_img.save(img_path, format="PNG")
+        img_path.seek(0)
+        pdf.image(img_path, x=0.5, y=0.2, w=label_width-1.0)
 
-            # Human-readable text below
-            c.restoreState()
-            c.setFont("Helvetica-Bold", 40)
-            text_y = y + 0.7*inch
-            c.drawCentredString(x + label_w/2.0, text_y, code)
+        # Text below barcode
+        pdf.set_font("Arial", "B", 36)
+        pdf.set_y(label_height/2)
+        pdf.multi_cell(0, 0.5, code, align="C")
 
-            # Optional label border
-            c.rect(x, y, label_w, label_h, stroke=0, fill=0)
-        except Exception as e:
-            st.error(f"Error drawing barcode {code}: {e}")
-        c.showPage()
+    output = BytesIO()
+    pdf.output(output)
+    output.seek(0)
+    return output
 
-    c.save()
-    buffer.seek(0)
-    return buffer
-
-# ------------------------------
-# Streamlit UI
-# ------------------------------
-
-st.title("🏷️ Warehouse Bin Label Generator (Code128)")
-st.write("Generate printable warehouse bin labels with customizable sequences and layout.")
-
-col1, col2 = st.columns(2)
-
-with col1:
-    prefix = st.text_input("Start Prefix", "16")
-    middle_input = st.text_input("Middle Section(s) (comma-separated)", "EA,ED,EF")
-    start_aisle = st.number_input("Start Aisle", 1, 999, 1)
-    end_aisle = st.number_input("End Aisle", 1, 999, 20)
-
-with col2:
-    level_letters_input = st.text_input("Level Letter(s) (comma-separated, optional)", "A,B,C,D")
-    start_level = st.number_input("Start Level", 1, 50, 1)
-    end_level = st.number_input("End Level", 1, 50, 5)
-
-st.divider()
-st.subheader("📄 Label & Page Settings")
-col3, col4 = st.columns(2)
-
-with col3:
-    label_w_in = st.number_input("Label Width (inches)", 1.0, 12.0, 4.0)
-    label_h_in = st.number_input("Label Height (inches)", 1.0, 12.0, 6.0)
-    orientation = st.selectbox("Label Orientation", ["horizontal", "vertical"], index=0)
-
-with col4:
-    page_type = st.selectbox("Page Size", ["4x6", "Letter", "A4"], index=0)
-
-# Determine page size
-if page_type == "A4":
-    page_size = A4
-elif page_type == "Letter":
-    page_size = letter
-else:
-    page_size = (4*inch, 6*inch)
-
-if st.button("🚀 Generate Labels PDF"):
-    middle_values = [m.strip().upper() for m in middle_input.split(",") if m.strip()]
-    level_letters = [x.strip().upper() for x in level_letters_input.split(",") if x.strip()] or None
-
-    if not middle_values:
-        st.error("Please provide at least one middle section (e.g., EA, ED, EF).")
-    else:
-        try:
-            codes = generate_bin_codes(prefix, middle_values, start_aisle, end_aisle,
-                                       level_letters, start_level, end_level)
-            if not codes:
-                st.warning("No labels generated. Check your inputs.")
-            else:
-                pdf_buffer = draw_labels_pdf(codes, label_w_in, label_h_in, orientation, page_size)
-                st.success(f"✅ Generated {len(codes)} labels successfully!")
-                st.download_button(
-                    label="📥 Download PDF",
-                    data=pdf_buffer,
-                    file_name="warehouse_bin_labels.pdf",
-                    mime="application/pdf"
-                )
-        except Exception as e:
-            st.error(f"Error generating labels: {e}")
-
-st.caption("Barcodes now use **Code128** — fully scannable, dash included, each label fills the full 4×6 inch page by default.")
+if generate_button:
+    codes = generate_codes()
+    pdf_file = create_pdf(codes)
+    st.download_button("Download PDF", pdf_file, file_name="bin_labels.pdf")

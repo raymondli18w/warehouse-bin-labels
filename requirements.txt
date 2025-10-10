@@ -1,0 +1,4 @@
+streamlit
+fpdf2
+python-barcode[pillow]
+Pillow
