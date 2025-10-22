@@ -1,4 +1,4 @@
 streamlit
 fpdf2
-python-barcode
+python-barcode>=0.13.0,<0.16.0
 Pillow
