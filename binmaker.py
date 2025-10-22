@@ -1,9 +1,8 @@
 import streamlit as st
 from fpdf import FPDF
 from io import BytesIO
-from barcode import Code128
-from barcode.writer import ImageWriter
-from PIL import Image
+import treepoem
+import re
 
 # -----------------------------
 # Streamlit App Configuration
@@ -11,7 +10,7 @@ from PIL import Image
 st.set_page_config(page_title="Warehouse Bin Label Generator", layout="wide")
 st.title("🏷️ Warehouse Bin Label Generator")
 
-# --- User inputs ---
+# --- User Inputs ---
 prefix = st.text_input("Prefix", value="16EA")
 start_middle = st.text_input("Start Middle (number)", value="21")
 end_middle = st.text_input("End Middle (number)", value="32")
@@ -22,6 +21,8 @@ end_level = st.text_input("End Level (optional, numeric)", value="1")
 
 label_width = st.number_input("Label Width (inches)", value=4.0)
 label_height = st.number_input("Label Height (inches)", value=6.0)
+labels_per_row = st.number_input("Labels per row", value=2, min_value=1, step=1)
+labels_per_column = st.number_input("Labels per column", value=3, min_value=1, step=1)
 
 generate_button = st.button("Generate PDF Labels")
 
@@ -29,15 +30,14 @@ generate_button = st.button("Generate PDF Labels")
 # Helper: Generate Codes
 # -----------------------------
 def generate_codes():
-    # Validate input
     if not start_middle or not end_middle:
-        st.error("Please enter numeric values for both 'Start Middle' and 'End Middle'.")
+        st.error("Please enter numeric values for 'Start Middle' and 'End Middle'.")
         return []
 
     try:
         middle_nums = range(int(start_middle), int(end_middle) + 1)
     except ValueError:
-        st.error("Start/End Middle must be numbers (e.g., 1 and 20).")
+        st.error("Start/End Middle must be numbers.")
         return []
 
     try:
@@ -46,50 +46,57 @@ def generate_codes():
         st.error("Level fields must be numeric if provided.")
         return []
 
-    level_letters = start_level_letter.split(",") if start_level_letter else [None]
-    end_level_letters = end_level_letter.split(",") if end_level_letter else [None]
+    level_letters = [s.strip().upper() for s in start_level_letter.split(",")] if start_level_letter else [None]
 
     codes = []
     for m in middle_nums:
-        for ll in (level_letters or [None]):
+        for ll in level_letters:
             for lv in level_nums:
-                code = f"{prefix}{str(m).zfill(2)}"
+                parts = [prefix, f"{m:02d}"]
                 if ll:
-                    code += f"{ll}"
+                    parts.append(ll)
                 if lv is not None:
-                    code += f"-{lv}"
-                codes.append(code)
+                    parts.append(f"-{lv}")
+                code = "".join(parts)
+                # Only allow safe Code128 characters (alphanumeric + hyphen)
+                if re.fullmatch(r"[A-Z0-9\-]+", code):
+                    codes.append(code)
     return codes
 
 # -----------------------------
 # Helper: Create PDF
 # -----------------------------
 def create_pdf(codes):
-    pdf = FPDF(unit='in', format=(label_width, label_height))
+    page_width = label_width * labels_per_row
+    page_height = label_height * labels_per_column
+    pdf = FPDF(unit="in", format=(page_width, page_height))
     pdf.set_auto_page_break(False)
 
-    for code in codes:
-        pdf.add_page()
-        # Generate barcode
-        barcode_obj = Code128(code, writer=ImageWriter(), add_checksum=False)
-        barcode_bytes = BytesIO()
-        barcode_obj.write(barcode_bytes, {"module_height": 10, "quiet_zone": 2})
-        barcode_bytes.seek(0)
-        barcode_img = Image.open(barcode_bytes)
+    for i, code in enumerate(codes):
+        if i % (labels_per_row * labels_per_column) == 0:
+            pdf.add_page()
+            x_offset = 0
+            y_offset = 0
 
-        # Save image to temp path in memory
-        img_temp = BytesIO()
-        barcode_img.save(img_temp, format="PNG")
-        img_temp.seek(0)
+        # Generate barcode using treepoem
+        barcode_img = treepoem.generate_barcode(
+            barcode_type="code128",
+            data=code
+        )
+        # Save to temporary file (required by FPDF)
+        barcode_img.convert("1").save("temp_barcode.png")
 
-        # Add to PDF (FPDF requires filename, so save temporarily)
-        barcode_img.save("temp_barcode.png", format="PNG")
-        pdf.image("temp_barcode.png", x=0.5, y=0.2, w=label_width - 1.0)
+        # Place barcode and text
+        pdf.image("temp_barcode.png", x=x_offset + 0.1, y=y_offset + 0.1, w=label_width - 0.2)
+        pdf.set_xy(x_offset, y_offset + label_height / 2)
+        pdf.set_font("Arial", "B", 20)
+        pdf.multi_cell(label_width, 0.3, code, align="C")
 
-        # Add text below barcode
-        pdf.set_font("Arial", "B", 36)
-        pdf.set_y(label_height / 2)
-        pdf.multi_cell(0, 0.5, code, align="C")
+        # Update position
+        x_offset += label_width
+        if (i + 1) % labels_per_row == 0:
+            x_offset = 0
+            y_offset += label_height
 
     output = BytesIO()
     pdf.output(output)
@@ -97,16 +104,19 @@ def create_pdf(codes):
     return output
 
 # -----------------------------
-# Main: Generate Button
+# Main: Generate PDF
 # -----------------------------
 if generate_button:
     codes = generate_codes()
     if codes:
         st.success(f"Generated {len(codes)} bin labels successfully!")
-        pdf_file = create_pdf(codes)
-        st.download_button(
-            "📥 Download PDF",
-            pdf_file,
-            file_name="bin_labels.pdf",
-            mime="application/pdf"
-        )
+        try:
+            pdf_file = create_pdf(codes)
+            st.download_button(
+                "📥 Download PDF",
+                pdf_file,
+                file_name="bin_labels.pdf",
+                mime="application/pdf"
+            )
+        except Exception as e:
+            st.error(f"Error generating PDF: {str(e)}")
