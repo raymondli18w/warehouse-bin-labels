@@ -7,12 +7,23 @@ import re
 import os
 
 # -----------------------------
-# Streamlit App
+# Bypass python-barcode's overzealous validation
+# -----------------------------
+# Code128 supports: 0-9, A-Z, and symbols including '-', which is ASCII 45
+# But python-barcode < 0.16 blocks '-' in some cases.
+# Workaround: monkey-patch the validation or construct raw
+
+# We'll use a safe method: ensure string only contains allowed Code128 chars
+def is_valid_code128(s):
+    # Code128 character set includes uppercase letters, digits, and many symbols
+    # Hyphen '-' is allowed (ASCII 45)
+    return bool(re.fullmatch(r"[A-Z0-9\-]+", s)) and len(s) > 0
+
 # -----------------------------
 st.set_page_config(page_title="Warehouse Bin Label Generator", layout="wide")
 st.title("🏷️ Warehouse Bin Label Generator")
 
-# --- User Inputs ---
+# --- Inputs ---
 prefix = st.text_input("Prefix", value="16EA")
 start_middle = st.text_input("Start Middle (number)", value="21")
 end_middle = st.text_input("End Middle (number)", value="32")
@@ -28,8 +39,6 @@ labels_per_column = st.number_input("Labels per column", value=3, min_value=1, s
 
 generate_button = st.button("Generate PDF Labels")
 
-# -----------------------------
-# Generate Codes
 # -----------------------------
 def generate_codes():
     if not start_middle or not end_middle:
@@ -54,20 +63,18 @@ def generate_codes():
     for m in middle_nums:
         for ll in level_letters:
             for lv in level_nums:
-                # Build human-readable code (with hyphen if level number exists)
                 base = f"{prefix}{m:02d}"
                 if ll:
                     base += ll
                 display_code = f"{base}-{lv}" if lv is not None else base
 
-                # Barcode data: remove hyphen and ensure only A-Z0-9
-                barcode_data = re.sub(r"[^A-Z0-9]", "", display_code)
-                if barcode_data and re.fullmatch(r"[A-Z0-9]+", barcode_data):
-                    codes.append((display_code, barcode_data))
+                # Now: KEEP the hyphen for barcode
+                if is_valid_code128(display_code):
+                    codes.append(display_code)
+                else:
+                    st.warning(f"Skipped invalid code: {display_code}")
     return codes
 
-# -----------------------------
-# Create PDF
 # -----------------------------
 def create_pdf(codes):
     page_width = label_width * labels_per_row
@@ -77,45 +84,47 @@ def create_pdf(codes):
 
     temp_files = []
 
-    for i, (display_code, barcode_data) in enumerate(codes):
+    for i, code in enumerate(codes):
         if i % (labels_per_row * labels_per_column) == 0:
             pdf.add_page()
             x_offset = 0
             y_offset = 0
 
-        # Generate barcode (no add_checksum — not supported in older versions)
-        barcode = Code128(barcode_data, writer=ImageWriter())
+        # Generate barcode WITH hyphen
+        # Note: We rely on the fact that '-' is valid in Code128
+        # Some versions of python-barcode allow it if the string is clean
+        try:
+            barcode = Code128(code, writer=ImageWriter())
+        except Exception as e:
+            st.error(f"Barcode generation failed for '{code}': {e}")
+            continue
+
         temp_name = f"temp_barcode_{i}"
         barcode.save(temp_name)
         png_path = f"{temp_name}.png"
         temp_files.append(png_path)
 
-        # Add to PDF
         pdf.image(png_path, x=x_offset + 0.1, y=y_offset + 0.1, w=label_width - 0.2)
         pdf.set_xy(x_offset, y_offset + label_height / 2)
         pdf.set_font("Arial", "B", 20)
-        pdf.multi_cell(label_width, 0.3, display_code, align="C")
+        pdf.multi_cell(label_width, 0.3, code, align="C")
 
-        # Update position
         x_offset += label_width
         if (i + 1) % labels_per_row == 0:
             x_offset = 0
             y_offset += label_height
 
-    # Output PDF
     output = BytesIO()
     pdf.output(output)
     output.seek(0)
 
-    # Cleanup temp files
+    # Cleanup
     for f in temp_files:
         if os.path.exists(f):
             os.remove(f)
 
     return output
 
-# -----------------------------
-# Main
 # -----------------------------
 if generate_button:
     codes = generate_codes()
@@ -130,4 +139,4 @@ if generate_button:
                 mime="application/pdf"
             )
         except Exception as e:
-            st.error(f"Error generating PDF: {str(e)}")
+            st.error(f"Error: {str(e)}")
